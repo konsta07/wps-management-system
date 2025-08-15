@@ -22,6 +22,53 @@ from ..database import get_db
 from ..models import Company as CompanyModel, WPS as WPSModel, WPQR as WPQRModel
 import io
 import os
+from pathlib import Path
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# ---- Fonts (Cyrillic) ----
+FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+
+# Default fonts (fallback)
+BODY_FONT = "Helvetica"
+BOLD_FONT = "Helvetica-Bold"
+
+def _register_fonts():
+    """Регистрация шрифтов с fallback на стандартные"""
+    global BODY_FONT, BOLD_FONT
+    
+    try:
+        # Попытка зарегистрировать DejaVu
+        dejavusans_path = FONT_DIR / "DejaVuSans.ttf"
+        dejavusans_bold_path = FONT_DIR / "DejaVuSans-Bold.ttf"
+        
+        if dejavusans_path.exists() and dejavusans_bold_path.exists():
+            pdfmetrics.registerFont(TTFont("DejaVuSans", str(dejavusans_path)))
+            pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(dejavusans_bold_path)))
+            BODY_FONT = "DejaVuSans"
+            BOLD_FONT = "DejaVuSans-Bold"
+            print("[PDF] DejaVu fonts registered successfully")
+        else:
+            # Попытка зарегистрировать Arial
+            arial_path = FONT_DIR / "arial.ttf"
+            arial_bold_path = FONT_DIR / "arialbd.ttf"
+            
+            if arial_path.exists() and arial_bold_path.exists():
+                pdfmetrics.registerFont(TTFont("Arial", str(arial_path)))
+                pdfmetrics.registerFont(TTFont("Arial-Bold", str(arial_bold_path)))
+                BODY_FONT = "Arial"
+                BOLD_FONT = "Arial-Bold"
+                print("[PDF] Arial fonts registered successfully")
+            else:
+                print("[PDF] Using default Helvetica fonts (no cyrillic support)")
+                
+    except Exception as e:
+        print(f"[PDF] Font registration failed, using Helvetica: {e}")
+        BODY_FONT = "Helvetica"
+        BOLD_FONT = "Helvetica-Bold"
+
+_register_fonts()
+
 
 class WPSPDFGenerator:
     """Генератор PDF для WPS документов"""
@@ -39,7 +86,8 @@ class WPSPDFGenerator:
             fontSize=16,
             spaceAfter=20,
             alignment=TA_CENTER,
-            textColor=colors.darkblue
+            textColor=colors.darkblue,
+            fontName=BOLD_FONT
         ))
         
         # Заголовки разделов
@@ -54,7 +102,8 @@ class WPSPDFGenerator:
             borderColor=colors.darkblue,
             borderPadding=5,
             backColor=colors.lightblue,
-            alignment=TA_CENTER
+            alignment=TA_CENTER,
+            fontName=BOLD_FONT
         ))
         
         # Обычный текст с отступом
@@ -63,7 +112,8 @@ class WPSPDFGenerator:
             parent=self.styles['Normal'],
             leftIndent=20,
             fontSize=10,
-            spaceBefore=5
+            spaceBefore=5,
+            fontName=BODY_FONT
         ))
         
         # Подпись/примечание
@@ -73,7 +123,8 @@ class WPSPDFGenerator:
             fontSize=9,
             textColor=colors.grey,
             alignment=TA_RIGHT,
-            spaceAfter=10
+            spaceAfter=10,
+            fontName=BODY_FONT
         ))
     
     def generate_wps_pdf(self, wps_data: dict, company_data: dict) -> bytes:
@@ -112,7 +163,7 @@ class WPSPDFGenerator:
         story.append(Spacer(1, 5*mm))
         
         # Техника и примечания
-        story.append(self._create_wps_technique_notes(wps_data))
+        story.extend(self._create_wps_technique_notes(wps_data))
         
         # Подписи
         story.append(Spacer(1, 10*mm))
@@ -126,10 +177,17 @@ class WPSPDFGenerator:
     
     def _create_wps_header(self, wps_data: dict, company_data: dict):
         """Создает заголовок WPS документа"""
+        # Извлекаем адрес из company
+        address_parts = []
+        if company_data.get('address'):
+            address_parts.append(company_data['address'])
+        
+        address_str = ", ".join(address_parts) if address_parts else "Address not specified"
+        
         # Таблица заголовка
         header_data = [
             [f"{company_data.get('name', 'Company Name')}", "WELDING PROCEDURE SPECIFICATION", f"WPS No: {wps_data.get('wps_number', 'N/A')}"],
-            [f"{company_data.get('city', '')}, {company_data.get('country', '')}", f"{wps_data.get('title', 'WPS Title')}", f"Rev: {wps_data.get('revision', '0')}"],
+            [address_str, f"{wps_data.get('title', 'WPS Title')}", f"Rev: {wps_data.get('revision', '0')}"],
             ["", f"Code: {wps_data.get('welding_code', 'N/A')}", f"Date: {wps_data.get('date_prepared', datetime.now().strftime('%d.%m.%Y'))}"]
         ]
         
@@ -137,7 +195,7 @@ class WPSPDFGenerator:
         header_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (-1, -1), BOLD_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
@@ -166,8 +224,10 @@ class WPSPDFGenerator:
         basic_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (2, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 2), (2, 2), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (2, 0), BOLD_FONT),
+            ('FONTNAME', (0, 2), (2, 2), BOLD_FONT),
+            ('FONTNAME', (0, 1), (2, 1), BODY_FONT),
+            ('FONTNAME', (0, 3), (2, 3), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (2, 0), colors.lightblue),
@@ -190,12 +250,13 @@ class WPSPDFGenerator:
             ]
         ]
         
-        base_table = Table(base_data, colWidths=[190*mm])
+        base_table = Table(base_data, colWidths=[38*mm, 38*mm, 38*mm, 38*mm, 38*mm])
         base_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (4, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (4, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (4, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkblue),
@@ -203,10 +264,6 @@ class WPSPDFGenerator:
             ('BACKGROUND', (0, 1), (4, 1), colors.lightblue),
             ('SPAN', (0, 0), (4, 0)),
         ]))
-        
-        # Добавляем строки для дополнительных колонок
-        base_table._argW[0] = 38*mm  # Specification
-        base_table._argW.extend([38*mm, 38*mm, 38*mm, 38*mm])  # Остальные колонки
         
         return base_table
     
@@ -229,8 +286,9 @@ class WPSPDFGenerator:
         filler_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (5, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (5, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (5, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkblue),
@@ -267,9 +325,11 @@ class WPSPDFGenerator:
         params_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (4, 1), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 3), (4, 3), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (4, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (4, 2), BODY_FONT),
+            ('FONTNAME', (0, 3), (4, 3), BOLD_FONT),
+            ('FONTNAME', (0, 4), (4, 4), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkblue),
@@ -314,7 +374,8 @@ class WPSPDFGenerator:
         signature_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (2, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (2, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (2, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (2, 0), colors.lightgrey),
@@ -339,7 +400,8 @@ class WPQRPDFGenerator:
             fontSize=16,
             spaceAfter=20,
             alignment=TA_CENTER,
-            textColor=colors.darkred
+            textColor=colors.darkred,
+            fontName=BOLD_FONT
         ))
         
         # Заголовки разделов
@@ -354,7 +416,18 @@ class WPQRPDFGenerator:
             borderColor=colors.darkred,
             borderPadding=5,
             backColor=colors.mistyrose,
-            alignment=TA_CENTER
+            alignment=TA_CENTER,
+            fontName=BOLD_FONT
+        ))
+        
+        # Обычный текст с отступом
+        self.styles.add(ParagraphStyle(
+            name='BodyIndented',
+            parent=self.styles['Normal'],
+            leftIndent=20,
+            fontSize=10,
+            spaceBefore=5,
+            fontName=BODY_FONT
         ))
     
     def generate_wpqr_pdf(self, wpqr_data: dict, wps_data: dict, company_data: dict) -> bytes:
@@ -401,9 +474,12 @@ class WPQRPDFGenerator:
     
     def _create_wpqr_header(self, wpqr_data: dict, wps_data: dict, company_data: dict):
         """Создает заголовок WPQR документа"""
+        # Правильно извлекаем адрес
+        address_str = company_data.get('address', 'Address not specified')
+        
         header_data = [
             [f"{company_data.get('name', 'Company Name')}", "WELDING PROCEDURE QUALIFICATION RECORD", f"WPQR No: {wpqr_data.get('wpqr_number', 'N/A')}"],
-            [f"{company_data.get('city', '')}, {company_data.get('country', '')}", f"{wpqr_data.get('title', 'WPQR Title')}", f"Rev: {wpqr_data.get('revision', '0')}"],
+            [address_str, f"{wpqr_data.get('title', 'WPQR Title')}", f"Rev: {wpqr_data.get('revision', '0')}"],
             ["", f"Qualified WPS: {wps_data.get('wps_number', 'N/A')}", f"Test Date: {wpqr_data.get('test_date', datetime.now().strftime('%d.%m.%Y'))}"]
         ]
         
@@ -411,7 +487,7 @@ class WPQRPDFGenerator:
         header_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (-1, -1), BOLD_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightcoral),
@@ -437,8 +513,9 @@ class WPQRPDFGenerator:
         basic_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (4, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (4, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (4, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkred),
@@ -466,8 +543,9 @@ class WPQRPDFGenerator:
         welder_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (3, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (3, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (3, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkred),
@@ -496,8 +574,9 @@ class WPQRPDFGenerator:
         params_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (4, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (4, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (4, 2), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkred),
@@ -519,7 +598,7 @@ class WPQRPDFGenerator:
                 self._get_result_symbol(wpqr_data.get('visual_inspection_result')),
                 "-",
                 "-",
-                wpqr_data.get('visual_inspection_notes', 'N/A')[:30] + "..." if len(wpqr_data.get('visual_inspection_notes', '')) > 30 else wpqr_data.get('visual_inspection_notes', 'N/A')
+                self._truncate_text(wpqr_data.get('visual_inspection_notes', 'N/A'), 30)
             ],
             [
                 "Tensile Test",
@@ -533,7 +612,7 @@ class WPQRPDFGenerator:
                 self._get_result_symbol(wpqr_data.get('bend_test_result')),
                 f"{wpqr_data.get('bend_test_angle', 'N/A')}°",
                 wpqr_data.get('bend_test_type', 'N/A'),
-                wpqr_data.get('bend_test_notes', 'N/A')[:30] + "..." if len(wpqr_data.get('bend_test_notes', '')) > 30 else wpqr_data.get('bend_test_notes', 'N/A')
+                self._truncate_text(wpqr_data.get('bend_test_notes', 'N/A'), 30)
             ],
             [
                 "Impact Test",
@@ -548,8 +627,9 @@ class WPQRPDFGenerator:
         mechanical_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (4, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (4, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (4, 6), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkred),
@@ -568,6 +648,12 @@ class WPQRPDFGenerator:
             return '✗ FAIL'
         else:
             return '- N/T'  # Not Tested
+    
+    def _truncate_text(self, text: str, max_length: int) -> str:
+        """Обрезает текст до указанной длины"""
+        if not text or text == 'N/A':
+            return 'N/A'
+        return text[:max_length] + "..." if len(text) > max_length else text
     
     def _create_wpqr_conclusion(self, wpqr_data: dict):
         """Заключение и подписи"""
@@ -591,9 +677,10 @@ class WPQRPDFGenerator:
         conclusion_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 1), (0, 1), 'Helvetica-Bold'),
-            ('FONTNAME', (0, 2), (3, 2), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (0, 0), BOLD_FONT),
+            ('FONTNAME', (0, 1), (0, 1), BOLD_FONT),
+            ('FONTNAME', (0, 2), (3, 2), BOLD_FONT),
+            ('FONTNAME', (0, 3), (3, 3), BODY_FONT),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, 0), colors.darkred),
@@ -608,29 +695,9 @@ class WPQRPDFGenerator:
         return conclusion_table
 
 
-# API endpoints для генерации PDF
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import Response
-from sqlalchemy.orm import Session
-from ..database import get_db
-from ..models import WPS, WPQR, Company
-
-pdf_router = APIRouter(prefix="/api/pdf", tags=["pdf"])
-
-def _draw_header(c: canvas.Canvas, title: str):
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(20 * mm, 280 * mm, title)
-    c.setLineWidth(1)
-    c.line(20 * mm, 278 * mm, 190 * mm, 278 * mm)
-    c.setFont("Helvetica", 9)
-
-def _draw_kv(c: canvas.Canvas, x_mm: float, y_mm: float, key: str, value: str):
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(x_mm * mm, y_mm * mm, f"{key}:")
-    c.setFont("Helvetica", 9)
-    c.drawString((x_mm + 40) * mm, y_mm * mm, value or "-")
-
+# Функции для простого Canvas подхода (альтернативный метод)
 def _fmt_date(d):
+    """Форматирует дату"""
     if not d:
         return "-"
     if isinstance(d, datetime):
@@ -640,14 +707,30 @@ def _fmt_date(d):
     except Exception:
         return str(d)
 
-def build_wpqr_pdf(wpqr: WPQRModel, wps: WPSModel | None, company: CompanyModel | None) -> bytes:
+def _draw_header(c, title: str):
+    """Рисует заголовок документа"""
+    c.setFont(BOLD_FONT, 14)
+    c.drawString(20 * mm, 280 * mm, title)
+    c.setLineWidth(1)
+    c.line(20 * mm, 278 * mm, 190 * mm, 278 * mm)
+    c.setFont(BODY_FONT, 9)
+
+def _draw_kv(c, x_mm: float, y_mm: float, key: str, value: str):
+    """Рисует пару ключ-значение"""
+    c.setFont(BOLD_FONT, 9)
+    c.drawString(x_mm * mm, y_mm * mm, f"{key}:")
+    c.setFont(BODY_FONT, 9)
+    c.drawString((x_mm + 40) * mm, y_mm * mm, str(value) if value else "-")
+
+def build_wpqr_pdf_simple(wpqr: WPQRModel, wps: WPSModel | None, company: CompanyModel | None) -> bytes:
+    """Простая генерация WPQR PDF через Canvas"""
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     _draw_header(c, "WPQR — Протокол квалификации сварки")
 
     y = 268
     _draw_kv(c, 20, y, "Компания", getattr(company, "name", "-")); y -= 6
-    _draw_kv(c, 20, y, "Код компании", getattr(company, "code", "-")); y -= 10
+    _draw_kv(c, 20, y, "Адрес", getattr(company, "address", "-")); y -= 10
 
     _draw_kv(c, 20, y, "Номер WPQR", wpqr.wpqr_number or f"ID {wpqr.id}"); y -= 6
     _draw_kv(c, 20, y, "Дата испытания", _fmt_date(wpqr.test_date)); y -= 6
@@ -656,8 +739,8 @@ def build_wpqr_pdf(wpqr: WPQRModel, wps: WPSModel | None, company: CompanyModel 
     if wps:
         _draw_kv(c, 20, y, "WPS №", f"{wps.wps_number} (rev {wps.revision or '0'})"); y -= 6
         _draw_kv(c, 20, y, "Процесс", wps.welding_process or "-"); y -= 6
-        _draw_kv(c, 20, y, "Материал (спец.)", wps.base_material_spec or "-"); y -= 6
-        _draw_kv(c, 20, y, "Диапазон толщин", f"{wps.base_material_thickness_min or '-'}–{wps.base_material_thickness_max or '-'} мм"); y -= 10
+        _draw_kv(c, 20, y, "Материал (спец.)", getattr(wps, 'base_metal_specification', '-')); y -= 6
+        _draw_kv(c, 20, y, "Диапазон толщин", f"{getattr(wps, 'thickness_range_min', '-')}–{getattr(wps, 'thickness_range_max', '-')} мм"); y -= 10
 
     _draw_kv(c, 20, y, "Сварщик", getattr(wpqr, "welder_name", "-")); y -= 6
     _draw_kv(c, 20, y, "Квалификация", getattr(wpqr, "welder_qualification", "-")); y -= 10
@@ -671,7 +754,7 @@ def build_wpqr_pdf(wpqr: WPQRModel, wps: WPSModel | None, company: CompanyModel 
     _draw_kv(c, 20, y, "Прочность (МПа)", str(getattr(wpqr, "tensile_strength_mpa", "") or "-")); y -= 6
     _draw_kv(c, 20, y, "Удлинение (%)", str(getattr(wpqr, "elongation_percent", "") or "-")); y -= 6
     _draw_kv(c, 20, y, "Изгиб", getattr(wpqr, "bend_test_result", "-")); y -= 6
-    _draw_kv(c, 20, y, "Ударная вязкость (Дж)", str(getattr(wpqr, "impact_energy", getattr(wpqr, "impact_energy_j", "")) or "-")); y -= 10
+    _draw_kv(c, 20, y, "Ударная вязкость (Дж)", str(getattr(wpqr, "impact_energy_j", "") or "-")); y -= 10
 
     _draw_kv(c, 20, y, "Утвердил", getattr(wpqr, "approved_by", "-")); y -= 6
     _draw_kv(c, 20, y, "Действует с", _fmt_date(getattr(wpqr, "valid_from", None))); y -= 6
@@ -685,88 +768,88 @@ def build_wpqr_pdf(wpqr: WPQRModel, wps: WPSModel | None, company: CompanyModel 
     buf.close()
     return pdf
 
-@pdf_router.get("/wpqr/{wpqr_id}")
-def get_wpqr_pdf(wpqr_id: int, db: Session = Depends(get_db)):
-    wpqr = db.query(WPQRModel).filter(WPQRModel.id == wpqr_id).first()
-    if not wpqr:
-        raise HTTPException(status_code=404, detail="WPQR not found")
 
-    wps = db.query(WPSModel).filter(WPSModel.id == wpqr.wps_id).first() if getattr(wpqr, "wps_id", None) else None
-    company = db.query(CompanyModel).filter(CompanyModel.id == wpqr.company_id).first()
-
-    pdf_bytes = build_wpqr_pdf(wpqr, wps, company)
-    filename = f'WPQR_{wpqr.wpqr_number or wpqr.id}.pdf'
-    return Response(content=pdf_bytes, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-
+# API endpoints для генерации PDF
+pdf_router = APIRouter(prefix="/api/pdf", tags=["pdf"])
 
 @pdf_router.get("/wps/{wps_id}")
 async def generate_wps_pdf(wps_id: int, db: Session = Depends(get_db)):
     """Генерирует PDF для WPS документа"""
     try:
         # Получаем данные WPS
-        wps = db.query(WPS).filter(WPS.id == wps_id).first()
+        wps = db.query(WPSModel).filter(WPSModel.id == wps_id).first()
         if not wps:
             raise HTTPException(status_code=404, detail="WPS not found")
         
         # Получаем данные компании
-        company = db.query(Company).filter(Company.id == wps.company_id).first()
+        company = db.query(CompanyModel).filter(CompanyModel.id == wps.company_id).first()
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
         
-        # Конвертируем в словари
+        # ✅ ПРАВИЛЬНОЕ МАППИНГ ПОЛЕЙ WPS
         wps_data = {
-            'wps_number': wps.wps_number,
-            'title': wps.title,
-            'revision': wps.revision,
-            'date_prepared': wps.date_prepared.strftime('%d.%m.%Y') if wps.date_prepared else '',
-            'date_approved': wps.date_approved.strftime('%d.%m.%Y') if wps.date_approved else '',
-            'welding_code': wps.welding_code,
-            'welding_process': wps.welding_process,
-            'welding_process_type': wps.welding_process_type,
-            'welding_positions': wps.welding_positions or [],
-            'joint_design': wps.joint_design,
-            'backing_type': wps.backing_type,
-            'base_metal_specification': wps.base_metal_specification,
-            'base_metal_type_grade': wps.base_metal_type_grade,
-            'base_metal_p_number': wps.base_metal_p_number,
-            'base_metal_group_number': wps.base_metal_group_number,
-            'thickness_range_min': wps.thickness_range_min,
-            'thickness_range_max': wps.thickness_range_max,
-            'filler_metal_specification': wps.filler_metal_specification,
-            'filler_metal_classification': wps.filler_metal_classification,
-            'filler_metal_f_number': wps.filler_metal_f_number,
-            'filler_metal_a_number': wps.filler_metal_a_number,
-            'filler_metal_diameter': wps.filler_metal_diameter,
-            'filler_metal_trade_name': wps.filler_metal_trade_name,
-            'current_type': wps.current_type,
-            'amperage_range_min': wps.amperage_range_min,
-            'amperage_range_max': wps.amperage_range_max,
-            'voltage_range_min': wps.voltage_range_min,
-            'voltage_range_max': wps.voltage_range_max,
-            'travel_speed_min': wps.travel_speed_min,
-            'travel_speed_max': wps.travel_speed_max,
-            'shielding_gas_type': wps.shielding_gas_type,
-            'shielding_gas_composition': wps.shielding_gas_composition,
-            'shielding_gas_flow_rate': wps.shielding_gas_flow_rate,
-            'preheat_temp_min': wps.preheat_temp_min,
-            'preheat_temp_max': wps.preheat_temp_max,
-            'interpass_temp_min': wps.interpass_temp_min,
-            'interpass_temp_max': wps.interpass_temp_max,
-            'pwht_temperature': wps.pwht_temperature,
-            'pwht_time': wps.pwht_time,
-            'technique': wps.technique,
-            'cleaning': wps.cleaning,
-            'remarks': wps.remarks,
-            'status': wps.status,
-            'prepared_by': wps.prepared_by,
-            'approved_by': wps.approved_by,
+            'wps_number': getattr(wps, 'wps_number', 'N/A'),
+            'title': getattr(wps, 'title', 'N/A'),
+            'revision': getattr(wps, 'revision', '0'),
+            'date_prepared': datetime.now().strftime('%d.%m.%Y'),  # Используем текущую дату
+            'date_approved': datetime.now().strftime('%d.%m.%Y'),   # Используем текущую дату
+            'welding_code': getattr(wps, 'welding_code', 'N/A'),
+            'welding_process': getattr(wps, 'welding_process', 'N/A'),
+            'welding_process_type': getattr(wps, 'welding_process_type', 'N/A'),
+            'welding_positions': getattr(wps, 'welding_positions', '').split(',') if getattr(wps, 'welding_positions', '') else [],
+            'joint_design': getattr(wps, 'joint_design', getattr(wps, 'joint_type', 'N/A')),
+            'backing_type': getattr(wps, 'backing_type', 'None'),
+            
+            # Базовые материалы - проверяем правильные имена полей
+            'base_metal_specification': getattr(wps, 'base_metal_specification', getattr(wps, 'base_material_spec', 'N/A')),
+            'base_metal_type_grade': getattr(wps, 'base_metal_type_grade', getattr(wps, 'base_material_grade', 'N/A')),
+            'base_metal_p_number': getattr(wps, 'base_metal_p_number', 'N/A'),
+            'base_metal_group_number': getattr(wps, 'base_metal_group_number', 'N/A'),
+            'thickness_range_min': getattr(wps, 'thickness_range_min', getattr(wps, 'base_material_thickness_min', 0)),
+            'thickness_range_max': getattr(wps, 'thickness_range_max', getattr(wps, 'base_material_thickness_max', 0)),
+            
+            # Присадочные материалы
+            'filler_metal_specification': getattr(wps, 'filler_metal_specification', getattr(wps, 'filler_material_spec', 'N/A')),
+            'filler_metal_classification': getattr(wps, 'filler_metal_classification', getattr(wps, 'filler_material_classification', 'N/A')),
+            'filler_metal_f_number': getattr(wps, 'filler_metal_f_number', 'N/A'),
+            'filler_metal_a_number': getattr(wps, 'filler_metal_a_number', 'N/A'),
+            'filler_metal_diameter': getattr(wps, 'filler_metal_diameter', getattr(wps, 'filler_material_diameter', 'N/A')),
+            'filler_metal_trade_name': getattr(wps, 'filler_metal_trade_name', 'N/A'),
+            
+            # Параметры сварки
+            'current_type': getattr(wps, 'current_type', 'N/A'),
+            'amperage_range_min': getattr(wps, 'amperage_range_min', getattr(wps, 'current_range_min', 0)),
+            'amperage_range_max': getattr(wps, 'amperage_range_max', getattr(wps, 'current_range_max', 0)),
+            'voltage_range_min': getattr(wps, 'voltage_range_min', 0),
+            'voltage_range_max': getattr(wps, 'voltage_range_max', 0),
+            'travel_speed_min': getattr(wps, 'travel_speed_min', 0),
+            'travel_speed_max': getattr(wps, 'travel_speed_max', 0),
+            
+            # Защитный газ
+            'shielding_gas_type': getattr(wps, 'shielding_gas_type', 'N/A'),
+            'shielding_gas_composition': getattr(wps, 'shielding_gas_composition', ''),
+            'shielding_gas_flow_rate': getattr(wps, 'shielding_gas_flow_rate', getattr(wps, 'gas_flow_rate', 'N/A')),
+            
+            # Температурные параметры
+            'preheat_temp_min': getattr(wps, 'preheat_temp_min', 0),
+            'preheat_temp_max': getattr(wps, 'preheat_temp_max', 0),
+            'interpass_temp_min': getattr(wps, 'interpass_temp_min', 0),
+            'interpass_temp_max': getattr(wps, 'interpass_temp_max', 0),
+            'pwht_temperature': getattr(wps, 'pwht_temperature', 'N/A'),
+            'pwht_time': getattr(wps, 'pwht_time', 'N/A'),
+            
+            # Дополнительные поля
+            'technique': getattr(wps, 'technique', 'Standard welding technique'),
+            'cleaning': getattr(wps, 'cleaning', 'Wire brush'),
+            'remarks': getattr(wps, 'remarks', 'No remarks'),
+            'status': getattr(wps, 'status', 'Draft'),
+            'prepared_by': getattr(wps, 'prepared_by', 'N/A'),
+            'approved_by': getattr(wps, 'approved_by', 'N/A'),
         }
         
         company_data = {
-            'name': company.name,
-            'city': company.city,
-            'country': company.country,
+            'name': getattr(company, 'name', 'Company Name'),
+            'address': getattr(company, 'address', 'Address not specified'),
         }
         
         # Генерируем PDF
@@ -788,82 +871,93 @@ async def generate_wps_pdf(wps_id: int, db: Session = Depends(get_db)):
 
 
 @pdf_router.get("/wpqr/{wpqr_id}")
-async def generate_wpqr_pdf(wpqr_id: int, db: Session = Depends(get_db)):
+async def generate_wpqr_pdf(wpqr_id: int, simple: bool = False, db: Session = Depends(get_db)):
     """Генерирует PDF для WPQR документа"""
     try:
         # Получаем данные WPQR
-        wpqr = db.query(WPQR).filter(WPQR.id == wpqr_id).first()
+        wpqr = db.query(WPQRModel).filter(WPQRModel.id == wpqr_id).first()
         if not wpqr:
             raise HTTPException(status_code=404, detail="WPQR not found")
         
         # Получаем связанные WPS и Company
-        wps = db.query(WPS).filter(WPS.id == wpqr.wps_id).first()
-        company = db.query(Company).filter(Company.id == wpqr.company_id).first()
+        wps = db.query(WPSModel).filter(WPSModel.id == wpqr.wps_id).first() if getattr(wpqr, "wps_id", None) else None
+        company = db.query(CompanyModel).filter(CompanyModel.id == wpqr.company_id).first()
         
-        if not wps or not company:
-            raise HTTPException(status_code=404, detail="Related WPS or Company not found")
+        if simple:
+            # Простая генерация через Canvas
+            pdf_bytes = build_wpqr_pdf_simple(wpqr, wps, company)
+        else:
+            # Продвинутая генерация через Platypus
+            if not company:
+                raise HTTPException(status_code=404, detail="Company not found")
+            
+            # ✅ ПРАВИЛЬНОЕ МАППИНГ ПОЛЕЙ WPQR
+            wpqr_data = {
+                'wpqr_number': getattr(wpqr, 'wpqr_number', 'N/A'),
+                'title': getattr(wpqr, 'title', 'WPQR Document'),
+                'revision': getattr(wpqr, 'revision', '0'),
+                'test_date': getattr(wpqr, 'test_date', datetime.now()).strftime('%d.%m.%Y') if getattr(wpqr, 'test_date', None) else datetime.now().strftime('%d.%m.%Y'),
+                
+                # Информация о сварщике
+                'welder_name': getattr(wpqr, 'welder_name', 'N/A'),
+                'welder_qualification': getattr(wpqr, 'welder_qualification', 'N/A'),
+                'welder_stamp_number': getattr(wpqr, 'welder_stamp_number', 'N/A'),
+                
+                # Квалификационные данные
+                'welding_code': getattr(wpqr, 'welding_code', 'N/A'),
+                'base_metal_specification': getattr(wpqr, 'base_metal_specification', getattr(wpqr, 'actual_base_material', 'N/A')),
+                'welding_process': getattr(wpqr, 'welding_process', 'N/A'),
+                'welding_position': getattr(wpqr, 'welding_position', getattr(wpqr, 'actual_welding_position', 'N/A')),
+                
+                # Фактические параметры
+                'current_type': getattr(wpqr, 'current_type', 'N/A'),
+                'amperage_actual': getattr(wpqr, 'amperage_actual', getattr(wpqr, 'actual_current', 'N/A')),
+                'voltage_actual': getattr(wpqr, 'voltage_actual', getattr(wpqr, 'actual_voltage', 'N/A')),
+                'travel_speed_actual': getattr(wpqr, 'travel_speed_actual', getattr(wpqr, 'actual_travel_speed', 'N/A')),
+                'heat_input': getattr(wpqr, 'heat_input', getattr(wpqr, 'actual_heat_input', 'N/A')),
+                
+                # Результаты испытаний
+                'visual_inspection_result': getattr(wpqr, 'visual_inspection_result', 'N/A'),
+                'visual_inspection_notes': getattr(wpqr, 'visual_inspection_notes', 'N/A'),
+                'tensile_test_result': getattr(wpqr, 'tensile_test_result', getattr(wpqr, 'tensile_result', 'N/A')),
+                'tensile_strength_mpa': getattr(wpqr, 'tensile_strength_mpa', getattr(wpqr, 'tensile_strength', 'N/A')),
+                'elongation_percent': getattr(wpqr, 'elongation_percent', 'N/A'),
+                'bend_test_result': getattr(wpqr, 'bend_test_result', 'N/A'),
+                'bend_test_type': getattr(wpqr, 'bend_test_type', 'N/A'),
+                'bend_test_angle': getattr(wpqr, 'bend_test_angle', 'N/A'),
+                'bend_test_notes': getattr(wpqr, 'bend_test_notes', 'N/A'),
+                'impact_test_result': getattr(wpqr, 'impact_test_result', getattr(wpqr, 'impact_result', 'N/A')),
+                'impact_test_temperature': getattr(wpqr, 'impact_test_temperature', getattr(wpqr, 'impact_test_temp', 'N/A')),
+                'impact_energy_j': getattr(wpqr, 'impact_energy_j', getattr(wpqr, 'impact_energy_weld', 'N/A')),
+                
+                # Заключение
+                'overall_result': getattr(wpqr, 'overall_result', 'Pending'),
+                'valid_from': getattr(wpqr, 'valid_from', datetime.now()).strftime('%d.%m.%Y') if getattr(wpqr, 'valid_from', None) else datetime.now().strftime('%d.%m.%Y'),
+                'valid_until': getattr(wpqr, 'valid_until', datetime.now()).strftime('%d.%m.%Y') if getattr(wpqr, 'valid_until', None) else 'TBD',
+                'tested_by': getattr(wpqr, 'tested_by', 'N/A'),
+                'approved_by': getattr(wpqr, 'approved_by', 'N/A'),
+                'remarks': getattr(wpqr, 'remarks', 'No remarks')
+            }
+            
+            wps_data = {
+                'wps_number': getattr(wps, 'wps_number', 'N/A') if wps else 'N/A',
+                'joint_design': getattr(wps, 'joint_design', getattr(wps, 'joint_type', 'N/A')) if wps else 'N/A'
+            }
+            
+            company_data = {
+                'name': getattr(company, 'name', 'Company Name'),
+                'address': getattr(company, 'address', 'Address not specified'),
+            }
+            
+            # Генерируем PDF
+            generator = WPQRPDFGenerator()
+            pdf_bytes = generator.generate_wpqr_pdf(wpqr_data, wps_data, company_data)
         
-        # Конвертируем в словари
-        wpqr_data = {
-            'wpqr_number': wpqr.wpqr_number,
-            'title': wpqr.title,
-            'revision': wpqr.revision,
-            'test_date': wpqr.test_date.strftime('%d.%m.%Y') if wpqr.test_date else '',
-            'welder_name': wpqr.welder_name,
-            'welder_qualification': wpqr.welder_qualification,
-            'welder_stamp_number': wpqr.welder_stamp_number,
-            'welding_code': wpqr.welding_code,
-            'base_metal_specification': wpqr.base_metal_specification,
-            'welding_process': wpqr.welding_process,
-            'welding_position': wpqr.welding_position,
-            'current_type': wpqr.current_type,
-            'amperage_actual': wpqr.amperage_actual,
-            'voltage_actual': wpqr.voltage_actual,
-            'travel_speed_actual': wpqr.travel_speed_actual,
-            'heat_input': wpqr.heat_input,
-            'visual_inspection_result': wpqr.visual_inspection_result,
-            'visual_inspection_notes': wpqr.visual_inspection_notes,
-            'tensile_test_result': wpqr.tensile_test_result,
-            'tensile_strength_mpa': wpqr.tensile_strength_mpa,
-            'elongation_percent': wpqr.elongation_percent,
-            'bend_test_result': wpqr.bend_test_result,
-            'bend_test_type': wpqr.bend_test_type,
-            'bend_test_angle': wpqr.bend_test_angle,
-            'bend_test_notes': wpqr.bend_test_notes,
-            'impact_test_result': wpqr.impact_test_result,
-            'impact_test_temperature': wpqr.impact_test_temperature,
-            'impact_energy_j': wpqr.impact_energy_j,
-            'overall_result': wpqr.overall_result,
-            'valid_from': wpqr.valid_from.strftime('%d.%m.%Y') if wpqr.valid_from else '',
-            'valid_until': wpqr.valid_until.strftime('%d.%m.%Y') if wpqr.valid_until else '',
-            'tested_by': wpqr.tested_by,
-            'approved_by': wpqr.approved_by,
-            'remarks': wpqr.remarks
-        }
-        
-        wps_data = {
-            'wps_number': wps.wps_number,
-            'joint_design': wps.joint_design
-        }
-        
-        company_data = {
-            'name': company.name,
-            'city': company.city,
-            'country': company.country,
-        }
-        
-        # Генерируем PDF
-        generator = WPQRPDFGenerator()
-        pdf_content = generator.generate_wpqr_pdf(wpqr_data, wps_data, company_data)
-        
-        # Возвращаем PDF
-        headers = {
-            'Content-Disposition': f'attachment; filename="WPQR_{wpqr.wpqr_number}.pdf"'
-        }
+        filename = f'WPQR_{wpqr.wpqr_number or wpqr.id}.pdf'
         return Response(
-            content=pdf_content, 
-            media_type='application/pdf',
-            headers=headers
+            content=pdf_bytes, 
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
         
     except Exception as e:

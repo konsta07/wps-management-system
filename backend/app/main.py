@@ -1,5 +1,4 @@
-# backend/app/main.py - Ваш полный код с исправленными импортами
-
+# backend/app/main.py - Исправленная версия
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,16 +15,7 @@ from .schemas import (
     WPQR, WPQRCreate, WPQRUpdate
 )
 
-# PDF роутер
-from .services.pdf_generator import pdf_router
-
-# Создаем таблицы при запуске
-try:
-    create_tables()
-    print("✅ Database tables created successfully")
-except Exception as e:
-    print(f"⚠️ Error creating tables: {e}")
-
+# ✅ СОЗДАЕМ APP СНАЧАЛА
 app = FastAPI(
     title="WPS Management System",
     description="Система управления технологическими картами сварки (WPS) и протоколами квалификации (WPQR)",
@@ -34,7 +24,7 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS настройки
+# ✅ CORS настройки
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -43,18 +33,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Подключение PDF роутера
-app.include_router(pdf_router)
+# ✅ ПОДКЛЮЧЕНИЕ PDF РОУТЕРА ПОСЛЕ СОЗДАНИЯ APP
+try:
+    from .services.pdf_generator import pdf_router
+    app.include_router(pdf_router)
+    print("✅ PDF router подключен успешно")
+except ImportError as e:
+    print(f"⚠️ PDF router не подключен: {e}")
+except Exception as e:
+    print(f"⚠️ Ошибка подключения PDF router: {e}")
 
 # Создание таблиц при запуске
 @app.on_event("startup")
 async def startup_event():
     """Инициализация базы данных при запуске приложения"""
-    create_tables()
-    print("✅ База данных инициализирована")
-    print("📄 PDF генератор подключен")
-    print("🚀 Сервер запущен: http://localhost:8000")
-    print("📚 API документация: http://localhost:8000/docs")
+    try:
+        create_tables()
+        print("✅ База данных инициализирована")
+        print("🚀 Сервер запущен: http://localhost:8000")
+        print("📚 API документация: http://localhost:8000/docs")
+    except Exception as e:
+        print(f"⚠️ Ошибка создания таблиц: {e}")
 
 # =====================================
 # БАЗОВЫЕ ENDPOINTS
@@ -101,7 +100,8 @@ async def root():
             },
             "pdf": {
                 "wps_pdf": "GET /api/pdf/wps/{wps_id}",
-                "wpqr_pdf": "GET /api/pdf/wpqr/{wpqr_id}"
+                "wpqr_pdf_advanced": "GET /api/pdf/wpqr/{wpqr_id}",
+                "wpqr_pdf_simple": "GET /api/pdf/wpqr/{wpqr_id}?simple=true"
             },
             "system": {
                 "health": "GET /health",
@@ -114,7 +114,7 @@ async def root():
 async def health_check(db: Session = Depends(get_db)):
     try:
         result = db.execute(text("SELECT 1")).scalar()
-        return {"status": "healthy", "database": "connected", "test_query": result, "pdf_generator": "active"}
+        return {"status": "healthy", "database": "connected", "test_query": result}
     except Exception as e:
         return {"status": "error", "database": "disconnected", "error": str(e)}
 
@@ -158,11 +158,11 @@ def get_company(company_id: int, db: Session = Depends(get_db)):
 @app.post("/companies", response_model=Company, status_code=status.HTTP_201_CREATED)
 def create_company(company: CompanyCreate, db: Session = Depends(get_db)):
     """Создать новую компанию"""
-    existing_company = db.query(CompanyModel).filter(CompanyModel.code == company.company_code).first()
+    existing_company = db.query(CompanyModel).filter(CompanyModel.code == company.code).first()
     if existing_company:
         raise HTTPException(
             status_code=400, 
-            detail=f"Company with code '{company.company_code}' already exists"
+            detail=f"Company with code '{company.code}' already exists"
         )
     
     db_company = CompanyModel(**company.dict())
@@ -202,7 +202,7 @@ def search_companies(search_term: str, db: Session = Depends(get_db)):
     """Поиск компаний по названию или коду (регистронезависимый)"""
     companies = db.query(CompanyModel).filter(
         CompanyModel.name.ilike(f"%{search_term}%") | 
-        CompanyModel.name.ilike(f"%{search_term}%")
+        CompanyModel.code.ilike(f"%{search_term}%")
     ).all()
     
     return {
@@ -254,7 +254,7 @@ def filter_companies(
     }
 
 # =====================================
-# WPS CRUD ENDPOINTS
+# WPS CRUD ENDPOINTS  
 # =====================================
 
 @app.get("/wps", response_model=List[WPS])
@@ -347,7 +347,7 @@ def get_wps_by_company(company_id: int, db: Session = Depends(get_db)):
     wps_list = db.query(WPSModel).filter(WPSModel.company_id == company_id).all()
     
     return {
-        "company": {"id": company.id, "name": company.name, "company.code": company.company_code},
+        "company": {"id": company.id, "name": company.name, "code": company.code},
         "wps_count": len(wps_list),
         "wps_list": [
             {
@@ -369,7 +369,6 @@ def search_wps(search_term: str, db: Session = Depends(get_db)):
         WPSModel.title.ilike(f"%{search_term}%") |
         WPSModel.welding_process.ilike(f"%{search_term}%") |
         WPSModel.base_material_spec.ilike(f"%{search_term}%")
-
     ).all()
     
     return {
@@ -381,7 +380,7 @@ def search_wps(search_term: str, db: Session = Depends(get_db)):
                 "wps_number": w.wps_number,
                 "title": w.title,
                 "welding_process": w.welding_process,
-                "actual_base_material": w.base_material_spec,
+                "base_material": w.base_material_spec,
                 "status": w.status,
                 "company_id": w.company_id
             } for w in wps_list
@@ -434,7 +433,6 @@ def create_wpqr(wpqr: WPQRCreate, db: Session = Depends(get_db)):
         if not wps:
             raise HTTPException(status_code=404, detail="WPS not found")
     
-    # Проверяем уникальность номера WPQR в рамках компании
     existing_wpqr = db.query(WPQRModel).filter(
         WPQRModel.company_id == wpqr.company_id,
         WPQRModel.wpqr_number == wpqr.wpqr_number
@@ -488,7 +486,7 @@ def get_wpqr_by_company(company_id: int, db: Session = Depends(get_db)):
     wpqr_list = db.query(WPQRModel).filter(WPQRModel.company_id == company_id).all()
     
     return {
-        "company": {"id": company.id, "name": company.name, "company.code": company.company_code},
+        "company": {"id": company.id, "name": company.name, "code": company.code},
         "wpqr_count": len(wpqr_list),
         "wpqr_list": [
             {
@@ -622,17 +620,17 @@ def create_sample_wps(db: Session = Depends(get_db)):
             "base_material_thickness_max": 20.0,
             "filler_material_spec": "ГОСТ 2246-70",
             "filler_material_classification": "Св-08Г2С",
-            "filler_material_diameter": 1.2,
-            "welding_positions": ["PA", "PB", "PC"],
+            "filler_material_diameter": "1.2",
+            "welding_positions": "PA,PB,PC",
             "joint_type": "BW",
             "current_type": "DC+",
-            "amperage_range_min": 120,
-            "amperage_range_max": 180,
+            "current_range_min": 120,
+            "current_range_max": 180,
             "voltage_range_min": 20.0,
             "voltage_range_max": 24.0,
             "shielding_gas_composition": "82% Ar + 18% CO2",
-            "shielding_gas_flow_rate": 12.0,
-            "status": "approved"
+            "gas_flow_rate": 12.0,
+            "status": "Active"
         },
         {
             "company_id": companies[0].id,
@@ -646,17 +644,17 @@ def create_sample_wps(db: Session = Depends(get_db)):
             "base_material_thickness_max": 30.0,
             "filler_material_spec": "ГОСТ 9466-75",
             "filler_material_classification": "УОНИ-13/55",
-            "filler_material_diameter": 1.2,
-            "welding_positions": ["PA", "PB", "PC", "PF", "PG"],
+            "filler_material_diameter": "4.0",
+            "welding_positions": "PA,PB,PC,PF,PG",
             "joint_type": "BW", 
             "current_type": "DC+",
-            "amperage_range_min": 140,
-            "amperage_range_max": 180,
+            "current_range_min": 140,
+            "current_range_max": 180,
             "voltage_range_min": 22.0,
             "voltage_range_max": 26.0,
             "preheat_temp_min": 20,
             "preheat_temp_max": 100,
-            "status": "approved"
+            "status": "Active"
         }
     ]
     
@@ -673,40 +671,21 @@ def create_sample_wps(db: Session = Depends(get_db)):
             "base_material_thickness_max": 8.0,
             "filler_material_spec": "ГОСТ 18143-72",
             "filler_material_classification": "Св-04Х19Н11М3",
-            "filler_material_diameter": 1.2,
-            "welding_positions": ["PA", "PB"],
+            "filler_material_diameter": "2.0",
+            "welding_positions": "PA,PB",
             "joint_type": "BW",
             "current_type": "DC-",
-            "amperage_range_min": 80,
-            "amperage_range_max": 120,
+            "current_range_min": 80,
+            "current_range_max": 120,
             "voltage_range_min": 10.0,
             "voltage_range_max": 14.0,
             "shielding_gas_composition": "100% Ar",
-            "shielding_gas_flow_rate": 8.0,
-            "status": "draft"
+            "gas_flow_rate": 8.0,
+            "status": "Draft"
         })
     
-    
-    # --- Нормализация ключей и значений под модель WPS ---
-    KEY_MAP = {
-        "amperage_range_min": "current_range_min",
-        "amperage_range_max": "current_range_max",
-        "shielding_gas_flow_rate": "gas_flow_rate",
-    }
-
-    def normalize_wps_payload(d: dict) -> dict:
-        out = {}
-        for k, v in d.items():
-            k2 = KEY_MAP.get(k, k)
-            out[k2] = v
-        # welding_positions: массив -> строка "PA,PB,PC"
-        if isinstance(out.get("welding_positions"), list):
-            out["welding_positions"] = ",".join(out["welding_positions"])
-        return out
-
     created_wps = []
     for wps_data in sample_wps:
-        wps_data = normalize_wps_payload(wps_data)
         existing = db.query(WPSModel).filter(
             WPSModel.company_id == wps_data["company_id"],
             WPSModel.wps_number == wps_data["wps_number"]
@@ -751,31 +730,30 @@ def create_sample_wpqr(db: Session = Depends(get_db)):
             "actual_base_material": "09Г2С",
             "base_metal_thickness": 10.0,
             "actual_filler_material": "Св-08Г2С",
-            "welding_process": "GMAW",                 # ← этого поля нет в модели — уберём в нормализации
             "actual_welding_position": "PA",
-            "current_type": "DC+",
-            "amperage_actual": 150,
-            "voltage_actual": 22.0,
-            "travel_speed_actual": 25.0,
-            "heat_input": 1.32,
-            "visual_inspection_result": "pass",
-            "visual_inspection_notes": "Без дефектов",
-            "tensile_test_result": "pass",
-            "tensile_strength_mpa": 520.0,
-            "elongation_percent": 22.0,
-            "bend_test_result": "pass",
+            "actual_current": 150,
+            "actual_voltage": 22.0,
+            "actual_travel_speed": 25.0,
+            "actual_heat_input": 1.32,
+            "tensile_strength": 520.0,
+            "tensile_result": "Pass",
             "bend_test_type": "Face",
             "bend_test_angle": 180,
+            "bend_test_result": "Pass",
             "bend_test_notes": "Без дефектов",
-            "impact_test_result": "pass",
-            "impact_test_temperature": 20,
-            "impact_energy_j": 85.0,
-            "overall_result": "pass",
-            "valid_from": datetime.now() - timedelta(days=25),
-            "valid_until": datetime.now() + timedelta(days=1095),
+            "impact_test_temp": 20,
+            "impact_energy_weld": 85.0,
+            "impact_result": "Pass",
+            "macro_examination_result": "Pass",
+            "macro_notes": "Структура однородная",
+            "ndt_method": "RT",
+            "ndt_result": "Pass",
+            "overall_result": "Qualified",
+            "qualified_thickness_range": "3-20mm",
+            "qualified_positions": "PA,PB,PC",
             "tested_by": "Инженер по сварке Петров И.И.",
             "approved_by": "Главный сварщик Сидоров С.С.",
-            "remarks": "Все испытания прошли успешно. WPQR действителен для производства."
+            "approved_date": datetime.now() - timedelta(days=25)
         },
         {
             "company_id": companies[0].id,
@@ -787,30 +765,29 @@ def create_sample_wpqr(db: Session = Depends(get_db)):
             "actual_base_material": "Ст3сп",
             "base_metal_thickness": 15.0,
             "actual_filler_material": "УОНИ-13/55",
-            "welding_process": "SMAW",
             "actual_welding_position": "PB",
-            "current_type": "DC+",
-            "amperage_actual": 160,
-            "voltage_actual": 24.0,
-            "travel_speed_actual": 15.0,
-            "heat_input": 2.56,
-            "visual_inspection_result": "pass",
-            "tensile_test_result": "pass",
-            "tensile_strength_mpa": 480.0,
-            "elongation_percent": 25.0,
-            "bend_test_result": "pass",
+            "actual_current": 160,
+            "actual_voltage": 24.0,
+            "actual_travel_speed": 15.0,
+            "actual_heat_input": 2.56,
+            "tensile_strength": 480.0,
+            "tensile_result": "Pass",
             "bend_test_type": "Root",
             "bend_test_angle": 180,
+            "bend_test_result": "Pass",
             "bend_test_notes": "Испытание прошло успешно",
-            "impact_test_result": "pass",
-            "impact_test_temperature": 0,
-            "impact_energy_j": 75.0,
-            "overall_result": "pass",
-            "valid_from": datetime.now() - timedelta(days=10),
-            "valid_until": datetime.now() + timedelta(days=1095),
+            "impact_test_temp": 0,
+            "impact_energy_weld": 75.0,
+            "impact_result": "Pass",
+            "macro_examination_result": "Pass",
+            "ndt_method": "UT",
+            "ndt_result": "Pass",
+            "overall_result": "Qualified",
+            "qualified_thickness_range": "5-30mm",
+            "qualified_positions": "PA,PB,PC,PF,PG",
             "tested_by": "Инженер по сварке Петров И.И.",
             "approved_by": "Главный сварщик Сидоров С.С.",
-            "remarks": "Квалификация подтверждена"
+            "approved_date": datetime.now() - timedelta(days=10)
         }
     ]
 
@@ -825,79 +802,28 @@ def create_sample_wpqr(db: Session = Depends(get_db)):
             "actual_base_material": "12Х18Н10Т",
             "base_metal_thickness": 6.0,
             "actual_filler_material": "Св-04Х19Н11М3",
-            "welding_process": "GTAW",
             "actual_welding_position": "PA",
-            "current_type": "DC-",
-            "amperage_actual": 100,
-            "voltage_actual": 12.0,
-            "travel_speed_actual": 12.0,
-            "heat_input": 1.0,
-            "visual_inspection_result": "pass",
-            "tensile_test_result": "pass",
-            "tensile_strength_mpa": 580.0,
-            "elongation_percent": 35.0,
-            "bend_test_result": "pass",
+            "actual_current": 100,
+            "actual_voltage": 12.0,
+            "actual_travel_speed": 12.0,
+            "actual_heat_input": 1.0,
+            "tensile_strength": 580.0,
+            "tensile_result": "Pass",
             "bend_test_type": "Side",
             "bend_test_angle": 180,
+            "bend_test_result": "Pass",
             "bend_test_notes": "Отличное качество сварного шва",
-            "overall_result": "pass",
-            "valid_from": datetime.now() - timedelta(days=2),
-            "valid_until": datetime.now() + timedelta(days=1460),
+            "macro_examination_result": "Pass",
+            "ndt_method": "PT",
+            "ndt_result": "Pass",
+            "overall_result": "Qualified",
+            "qualified_thickness_range": "1-8mm",
+            "qualified_positions": "PA,PB",
             "tested_by": "Инженер по сварке Семенов С.С.",
             "approved_by": "Главный технолог Федоров Ф.Ф.",
-            "remarks": "Квалификация для нержавеющих сталей подтверждена"
+            "approved_date": datetime.now() - timedelta(days=2)
         })
 
-    # --- Нормализация под модель WPQR ---
-    model_cols = set(c.name for c in WPQRModel.__table__.columns)
-
-    KEY_MAP = {
-        # если в модели есть такие поля — раскомментируй нужные:
-        "actual_base_material": "actual_base_material",     # или "base_material"
-        "actual_filler_material": "actual_filler_material", # или "filler_material"
-        "actual_welding_position": "actual_welding_position",  # или "welding_position"
-        "impact_energy_j": "impact_energy",  # если в модели impact_energy, иначе оставим как есть ниже
-        # Поля, которых в модели нет — удаляем:
-        "welding_process": None,
-    }
-
-    def normalize_wpqr_payload(d: dict) -> dict:
-        out = {}
-        for k, v in d.items():
-            k2 = KEY_MAP.get(k, k)
-            if k2 is None:
-                continue
-            out[k2] = v
-        # отфильтруем только реально существующие в модели колонки
-        out = {k: v for k, v in out.items() if k in model_cols}
-        return out
-
-    created_wpqr = []
-    for wpqr_data in sample_wpqr:
-        wpqr_data = normalize_wpqr_payload(wpqr_data)
-
-        existing = db.query(WPQRModel).filter(
-            WPQRModel.company_id == wpqr_data["company_id"],
-            WPQRModel.wpqr_number == wpqr_data["wpqr_number"]
-        ).first()
-
-        if not existing:
-            db_wpqr = WPQRModel(**wpqr_data)
-            db.add(db_wpqr)
-            created_wpqr.append(wpqr_data["wpqr_number"])
-
-    try:
-        db.commit()
-        return {
-            "message": "Sample WPQR created successfully",
-            "created_count": len(created_wpqr),
-            "created_wpqr": created_wpqr
-        }
-    except Exception as e:
-        db.rollback()
-        return {"error": f"Failed to create WPQR: {str(e)}"}
-
-    
     created_wpqr = []
     for wpqr_data in sample_wpqr:
         existing = db.query(WPQRModel).filter(
@@ -919,6 +845,10 @@ def create_sample_wpqr(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"error": f"Failed to create WPQR: {str(e)}"}
+
+# =====================================
+# ЗАВЕРШЕНИЕ И ОБРАБОТКА ОШИБОК
+# =====================================
 
 # Обработчик ошибок
 @app.exception_handler(Exception)
