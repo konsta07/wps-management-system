@@ -1,20 +1,31 @@
 # backend/app/main.py - Исправленная версия
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import List
 import uvicorn
+import os
+import uuid
+from pathlib import Path
+import shutil
+from datetime import date, timedelta
 
 from .database import get_db, create_tables
 from .models import Company as CompanyModel, WPS as WPSModel, WPQR as WPQRModel
+from .models.welder import Welder as WelderModel, WelderCertificate as WelderCertificateModel
 from .schemas import (
     Company, CompanyCreate, CompanyUpdate,
     WPS, WPSCreate, WPSUpdate,
     WPQR, WPQRCreate, WPQRUpdate
 )
-
+from .schemas.welder import (
+    Welder, WelderCreate, WelderUpdate,
+    WelderCertificate, WelderCertificateCreate, WelderCertificateUpdate,
+    ExpiringCertificatesResponse, ExpiringCertificate
+)
 # ✅ СОЗДАЕМ APP СНАЧАЛА
 app = FastAPI(
     title="WPS Management System",
@@ -32,6 +43,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+STATIC_DIR = Path("static")
+LOGOS_DIR = STATIC_DIR / "logos"
+LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Подключаем статические файлы
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ✅ ПОДКЛЮЧЕНИЕ PDF РОУТЕРА ПОСЛЕ СОЗДАНИЯ APP
 try:
@@ -98,6 +115,24 @@ async def root():
                 "search": "GET /wpqr/search/{term}",
                 "create_sample": "POST /wpqr/create-sample"
             },
+            "welders": {
+                "list": "GET /welders",
+                "create": "POST /welders",
+                "get": "GET /welders/{id}",
+                "update": "PUT /welders/{id}",
+                "delete": "DELETE /welders/{id}",
+                "by_company": "GET /welders/by-company/{company_id}",
+                "create_sample": "POST /welders/create-sample"
+            },
+            "certificates": {
+                "list": "GET /certificates",
+                "create": "POST /certificates",
+                "get": "GET /certificates/{id}",
+                "update": "PUT /certificates/{id}",
+                "delete": "DELETE /certificates/{id}",
+                "upload_file": "POST /certificates/{id}/upload-file",
+                "expiring": "GET /companies/{id}/expiring-certificates"
+            },
             "pdf": {
                 "wps_pdf": "GET /api/pdf/wps/{wps_id}",
                 "wpqr_pdf_advanced": "GET /api/pdf/wpqr/{wpqr_id}",
@@ -137,6 +172,163 @@ async def test_database():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+
+def validate_image_file(file: UploadFile) -> None:
+    """Валидация загружаемого файла изображения"""
+    # Проверяем расширение файла
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неподдерживаемый формат файла. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+    
+    # Проверяем MIME тип
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Файл должен быть изображением"
+        )
+
+def save_logo_file(file: UploadFile, company_id: int) -> str:
+    """Сохранение файла логотипа и возврат URL"""
+    # Генерируем уникальное имя файла
+    file_ext = Path(file.filename).suffix.lower()
+    filename = f"company_{company_id}_{uuid.uuid4()}{file_ext}"
+    file_path = LOGOS_DIR / filename
+    
+    # Сохраняем файл
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка сохранения файла: {str(e)}"
+        )
+    
+    # Возвращаем URL для доступа к файлу
+    return f"/static/logos/{filename}"
+
+def delete_old_logo(logo_url: str) -> None:
+    """Удаление старого файла логотипа"""
+    if logo_url and logo_url.startswith("/static/logos/"):
+        old_file_path = Path("static") / logo_url.replace("/static/", "")
+        if old_file_path.exists():
+            try:
+                old_file_path.unlink()
+            except Exception as e:
+                print(f"⚠️ Не удалось удалить старый логотип {old_file_path}: {e}")
+
+@app.post("/companies/{company_id}/upload-logo")
+async def upload_company_logo(
+    company_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Загрузка логотипа для компании"""
+    
+    # Проверяем, что компания существует
+    company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    # Валидируем файл
+    validate_image_file(file)
+    
+    # Проверяем размер файла
+    file.file.seek(0, 2)  # Переходим в конец файла
+    file_size = file.file.tell()
+    file.file.seek(0)  # Возвращаемся в начало
+    
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Файл слишком большой. Максимальный размер: {MAX_FILE_SIZE // (1024*1024)}MB"
+        )
+    
+    # Удаляем старый логотип, если есть
+    if company.logo_url:
+        delete_old_logo(company.logo_url)
+    
+    # Сохраняем новый файл
+    logo_url = save_logo_file(file, company_id)
+    
+    # Обновляем запись в базе данных
+    company.logo_url = logo_url
+    db.commit()
+    db.refresh(company)
+    
+    return {
+        "message": "Логотип загружен успешно",
+        "logo_url": logo_url,
+        "filename": file.filename,
+        "file_size": file_size,
+        "company": {
+            "id": company.id,
+            "name": company.name,
+            "logo_url": company.logo_url
+        }
+    }
+
+@app.delete("/companies/{company_id}/delete-logo")
+def delete_company_logo(company_id: int, db: Session = Depends(get_db)):
+    """Удаление логотипа компании"""
+    
+    # Проверяем, что компания существует
+    company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    if not company.logo_url:
+        raise HTTPException(status_code=404, detail="У компании нет логотипа")
+    
+    # Удаляем файл
+    delete_old_logo(company.logo_url)
+    
+    # Обновляем запись в базе данных
+    old_logo_url = company.logo_url
+    company.logo_url = None
+    db.commit()
+    
+    return {
+        "message": "Логотип удален успешно",
+        "deleted_logo_url": old_logo_url,
+        "company": {
+            "id": company.id,
+            "name": company.name,
+            "logo_url": company.logo_url
+        }
+    }
+
+@app.get("/companies/{company_id}/logo")
+def get_company_logo_info(company_id: int, db: Session = Depends(get_db)):
+    """Получение информации о логотипе компании"""
+    
+    company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    if not company.logo_url:
+        return {
+            "has_logo": False,
+            "logo_url": None,
+            "company_name": company.name
+        }
+    
+    # Проверяем, существует ли файл
+    logo_path = Path("static") / company.logo_url.replace("/static/", "")
+    file_exists = logo_path.exists()
+    
+    return {
+        "has_logo": True,
+        "logo_url": company.logo_url,
+        "file_exists": file_exists,
+        "company_name": company.name,
+        "file_path": str(logo_path) if file_exists else None
+    }
 # =====================================
 # COMPANIES CRUD ENDPOINTS
 # =====================================
@@ -846,6 +1038,455 @@ def create_sample_wpqr(db: Session = Depends(get_db)):
         db.rollback()
         return {"error": f"Failed to create WPQR: {str(e)}"}
 
+@app.get("/welders", response_model=List[Welder])
+def get_welders(
+    company_id: int = None, 
+    status: str = None,
+    skip: int = 0, 
+    limit: int = 100, 
+    db: Session = Depends(get_db)
+):
+    """Получить список сварщиков с фильтрацией"""
+    query = db.query(WelderModel)
+    
+    if company_id:
+        query = query.filter(WelderModel.company_id == company_id)
+    if status:
+        query = query.filter(WelderModel.status.ilike(f"%{status}%"))
+    
+    welders = query.offset(skip).limit(limit).all()
+    return welders
+
+@app.get("/welders/{welder_id}", response_model=Welder)
+def get_welder(welder_id: int, db: Session = Depends(get_db)):
+    """Получить сварщика по ID"""
+    welder = db.query(WelderModel).filter(WelderModel.id == welder_id).first()
+    if welder is None:
+        raise HTTPException(status_code=404, detail="Welder not found")
+    return welder
+
+@app.post("/welders", response_model=Welder, status_code=status.HTTP_201_CREATED)
+def create_welder(welder: WelderCreate, db: Session = Depends(get_db)):
+    """Создать нового сварщика"""
+    company = db.query(CompanyModel).filter(CompanyModel.id == welder.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    # Проверяем уникальность табельного номера в компании
+    if welder.employee_number:
+        existing_welder = db.query(WelderModel).filter(
+            WelderModel.company_id == welder.company_id,
+            WelderModel.employee_number == welder.employee_number
+        ).first()
+        if existing_welder:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Employee number '{welder.employee_number}' already exists in company '{company.name}'"
+            )
+    
+    db_welder = WelderModel(**welder.dict())
+    db.add(db_welder)
+    db.commit()
+    db.refresh(db_welder)
+    return db_welder
+
+@app.put("/welders/{welder_id}", response_model=Welder)
+def update_welder(welder_id: int, welder_update: WelderUpdate, db: Session = Depends(get_db)):
+    """Обновить сварщика"""
+    welder = db.query(WelderModel).filter(WelderModel.id == welder_id).first()
+    if welder is None:
+        raise HTTPException(status_code=404, detail="Welder not found")
+    
+    update_data = welder_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(welder, field, value)
+    
+    db.commit()
+    db.refresh(welder)
+    return welder
+
+@app.delete("/welders/{welder_id}")
+def delete_welder(welder_id: int, db: Session = Depends(get_db)):
+    """Удалить сварщика"""
+    welder = db.query(WelderModel).filter(WelderModel.id == welder_id).first()
+    if welder is None:
+        raise HTTPException(status_code=404, detail="Welder not found")
+    
+    welder_name = f"{welder.first_name} {welder.last_name}"
+    db.delete(welder)
+    db.commit()
+    return {"message": f"Welder '{welder_name}' deleted successfully", "deleted_id": welder_id}
+
+@app.get("/welders/by-company/{company_id}")
+def get_welders_by_company(company_id: int, db: Session = Depends(get_db)):
+    """Получить всех сварщиков конкретной компании"""
+    company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    welders = db.query(WelderModel).filter(WelderModel.company_id == company_id).all()
+    
+    return {
+        "company": {"id": company.id, "name": company.name, "code": company.code},
+        "welders_count": len(welders),
+        "welders": [
+            {
+                "id": w.id,
+                "full_name": f"{w.first_name} {w.last_name}",
+                "employee_number": w.employee_number,
+                "phone": w.phone,
+                "status": w.status,
+                "certificates_count": len(w.certificates),
+                "hire_date": w.hire_date
+            } for w in welders
+        ]
+    }
+
+# =====================================
+# WELDER CERTIFICATES CRUD ENDPOINTS
+# =====================================
+
+@app.get("/certificates", response_model=List[WelderCertificate])
+def get_certificates(
+    welder_id: int = None,
+    company_id: int = None,
+    status: str = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Получить список сертификатов с фильтрацией"""
+    query = db.query(WelderCertificateModel)
+    
+    if welder_id:
+        query = query.filter(WelderCertificateModel.welder_id == welder_id)
+    if company_id:
+        query = query.filter(WelderCertificateModel.company_id == company_id)
+    if status:
+        query = query.filter(WelderCertificateModel.status.ilike(f"%{status}%"))
+    
+    certificates = query.offset(skip).limit(limit).all()
+    return certificates
+
+@app.get("/certificates/{certificate_id}", response_model=WelderCertificate)
+def get_certificate(certificate_id: int, db: Session = Depends(get_db)):
+    """Получить сертификат по ID"""
+    certificate = db.query(WelderCertificateModel).filter(WelderCertificateModel.id == certificate_id).first()
+    if certificate is None:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    return certificate
+
+@app.post("/certificates", response_model=WelderCertificate, status_code=status.HTTP_201_CREATED)
+def create_certificate(certificate: WelderCertificateCreate, db: Session = Depends(get_db)):
+    """Создать новый сертификат"""
+    welder = db.query(WelderModel).filter(WelderModel.id == certificate.welder_id).first()
+    if not welder:
+        raise HTTPException(status_code=404, detail="Welder not found")
+    
+    company = db.query(CompanyModel).filter(CompanyModel.id == certificate.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    # Проверяем уникальность номера сертификата в компании
+    existing_certificate = db.query(WelderCertificateModel).filter(
+        WelderCertificateModel.company_id == certificate.company_id,
+        WelderCertificateModel.certificate_number == certificate.certificate_number
+    ).first()
+    if existing_certificate:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Certificate number '{certificate.certificate_number}' already exists in company '{company.name}'"
+        )
+    
+    db_certificate = WelderCertificateModel(**certificate.dict())
+    db.add(db_certificate)
+    db.commit()
+    db.refresh(db_certificate)
+    return db_certificate
+
+@app.put("/certificates/{certificate_id}", response_model=WelderCertificate)
+def update_certificate(certificate_id: int, certificate_update: WelderCertificateUpdate, db: Session = Depends(get_db)):
+    """Обновить сертификат"""
+    certificate = db.query(WelderCertificateModel).filter(WelderCertificateModel.id == certificate_id).first()
+    if certificate is None:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    update_data = certificate_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(certificate, field, value)
+    
+    db.commit()
+    db.refresh(certificate)
+    return certificate
+
+@app.delete("/certificates/{certificate_id}")
+def delete_certificate(certificate_id: int, db: Session = Depends(get_db)):
+    """Удалить сертификат"""
+    certificate = db.query(WelderCertificateModel).filter(WelderCertificateModel.id == certificate_id).first()
+    if certificate is None:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    certificate_number = certificate.certificate_number
+    db.delete(certificate)
+    db.commit()
+    return {"message": f"Certificate '{certificate_number}' deleted successfully", "deleted_id": certificate_id}
+
+# =====================================
+# CERTIFICATE FILE UPLOAD ENDPOINTS
+# =====================================
+
+@app.post("/certificates/{certificate_id}/upload-file")
+async def upload_certificate_file(
+    certificate_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Загрузка файла сертификата"""
+    
+    # Проверяем, что сертификат существует
+    certificate = db.query(WelderCertificateModel).filter(WelderCertificateModel.id == certificate_id).first()
+    if not certificate:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    # Валидируем файл (PDF, JPG, PNG)
+    ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неподдерживаемый формат файла. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+    
+    # Проверяем размер файла (10MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Файл слишком большой. Максимальный размер: {MAX_FILE_SIZE // (1024*1024)}MB"
+        )
+    
+    # Создаем папку для сертификатов
+    CERTIFICATES_DIR = Path("static") / "certificates"
+    CERTIFICATES_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Удаляем старый файл, если есть
+    if certificate.certificate_file_url:
+        old_file_path = Path("static") / certificate.certificate_file_url.replace("/static/", "")
+        if old_file_path.exists():
+            try:
+                old_file_path.unlink()
+            except Exception as e:
+                print(f"⚠️ Не удалось удалить старый файл {old_file_path}: {e}")
+    
+    # Сохраняем новый файл
+    import uuid
+    filename = f"cert_{certificate_id}_{uuid.uuid4()}{file_ext}"
+    file_path = CERTIFICATES_DIR / filename
+    
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка сохранения файла: {str(e)}"
+        )
+    
+    # Обновляем запись в базе данных
+    certificate.certificate_file_url = f"/static/certificates/{filename}"
+    db.commit()
+    db.refresh(certificate)
+    
+    return {
+        "message": "Файл сертификата загружен успешно",
+        "file_url": certificate.certificate_file_url,
+        "filename": file.filename,
+        "file_size": file_size
+    }
+
+# =====================================
+# EXPIRING CERTIFICATES ENDPOINTS
+# =====================================
+
+@app.get("/companies/{company_id}/expiring-certificates", response_model=ExpiringCertificatesResponse)
+def get_expiring_certificates(company_id: int, days_ahead: int = 60, db: Session = Depends(get_db)):
+    """Получить истекающие сертификаты компании"""
+    
+    company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    # Получаем сертификаты, истекающие в ближайшие days_ahead дней
+    cutoff_date = date.today() + timedelta(days=days_ahead)
+    
+    certificates = db.query(WelderCertificateModel).join(WelderModel).filter(
+        WelderCertificateModel.company_id == company_id,
+        WelderCertificateModel.expiry_date <= cutoff_date,
+        WelderCertificateModel.status == "Valid"
+    ).all()
+    
+    # Группируем по уровню срочности
+    critical = []  # < 30 дней
+    urgent = []    # 30-60 дней  
+    warning = []   # 60+ дней
+    
+    for cert in certificates:
+        days_until_expiry = (cert.expiry_date - date.today()).days
+        welder_name = f"{cert.welder.first_name} {cert.welder.last_name}"
+        
+        expiring_cert = ExpiringCertificate(
+            certificate_id=cert.id,
+            welder_name=welder_name,
+            certificate_number=cert.certificate_number,
+            welding_group=cert.welding_group,
+            welding_method=cert.welding_method,
+            expiry_date=cert.expiry_date,
+            days_until_expiry=days_until_expiry,
+            urgency_level="critical" if days_until_expiry < 30 else "urgent" if days_until_expiry < 60 else "warning"
+        )
+        
+        if days_until_expiry < 0:
+            critical.append(expiring_cert)  # Уже истек
+        elif days_until_expiry < 30:
+            critical.append(expiring_cert)
+        elif days_until_expiry < 60:
+            urgent.append(expiring_cert)
+        else:
+            warning.append(expiring_cert)
+    
+    return ExpiringCertificatesResponse(
+        company_id=company_id,
+        company_name=company.name,
+        total_expiring=len(certificates),
+        critical=critical,
+        urgent=urgent,
+        warning=warning
+    )
+
+# =====================================
+# SAMPLE DATA CREATION FOR WELDERS
+# =====================================
+
+@app.post("/welders/create-sample")
+def create_sample_welders(db: Session = Depends(get_db)):
+    """Создать образцы сварщиков для тестирования"""
+    companies = db.query(CompanyModel).all()
+    if not companies:
+        return {"error": "No companies found. Create companies first using /companies/create-sample"}
+    
+    from datetime import date, timedelta
+    import random
+    
+    sample_welders = [
+        {
+            "company_id": companies[0].id,
+            "first_name": "Иван",
+            "last_name": "Петров",
+            "middle_name": "Сергеевич",
+            "phone": "+7 (900) 123-45-67",
+            "email": "i.petrov@example.com",
+            "employee_number": "0001",
+            "status": "Active",
+            "hire_date": date.today() - timedelta(days=365)
+        },
+        {
+            "company_id": companies[0].id,
+            "first_name": "Алексей",
+            "last_name": "Сидоров",
+            "middle_name": "Владимирович",
+            "phone": "+7 (900) 234-56-78",
+            "employee_number": "0002",
+            "status": "Active",
+            "hire_date": date.today() - timedelta(days=500)
+        },
+        {
+            "company_id": companies[0].id,
+            "first_name": "Михаил",
+            "last_name": "Козлов",
+            "phone": "+7 (900) 345-67-89",
+            "employee_number": "0003",
+            "status": "Active"
+        }
+    ]
+    
+    if len(companies) > 1:
+        sample_welders.extend([
+            {
+                "company_id": companies[1].id,
+                "first_name": "Дмитрий",
+                "last_name": "Васильев",
+                "middle_name": "Игоревич",
+                "phone": "+7 (900) 456-78-90",
+                "employee_number": "0001",
+                "status": "Active"
+            },
+            {
+                "company_id": companies[1].id,
+                "first_name": "Сергей",
+                "last_name": "Федоров",
+                "phone": "+7 (900) 567-89-01",
+                "employee_number": "0002",
+                "status": "Active"
+            }
+        ])
+    
+    created_welders = []
+    for welder_data in sample_welders:
+        existing = db.query(WelderModel).filter(
+            WelderModel.company_id == welder_data["company_id"],
+            WelderModel.employee_number == welder_data["employee_number"]
+        ).first()
+        if not existing:
+            db_welder = WelderModel(**welder_data)
+            db.add(db_welder)
+            created_welders.append(f"{welder_data['first_name']} {welder_data['last_name']}")
+    
+    try:
+        db.commit()
+        
+        # Создаем образцы сертификатов для созданных сварщиков
+        welders = db.query(WelderModel).all()
+        created_certificates = []
+        
+        for welder in welders[-len(created_welders):]:  # Только для новых сварщиков
+            # Создаем 1-2 сертификата на сварщика
+            for i in range(random.randint(1, 2)):
+                cert_data = {
+                    "welder_id": welder.id,
+                    "company_id": welder.company_id,
+                    "certificate_number": f"НАКС-{welder.employee_number}-{i+1}-2024",
+                    "certification_body": "НАКС" if i == 0 else random.choice(["НАКС", "AWS", "TÜV"]),
+                    "welding_group": random.choice(["А", "Б", "В", "Г"]),
+                    "welding_method": random.choice(["РД", "АД", "ПП", "ЭШС"]),
+                    "welding_process": random.choice(["SMAW", "GMAW", "GTAW"]),
+                    "base_material": random.choice(["Сталь углеродистая", "Сталь нержавеющая", "Алюминий"]),
+                    "thickness_range": random.choice(["3-12мм", "5-20мм", "8-25мм"]),
+                    "welding_positions": random.choice(["PA,PB", "PA,PB,PC", "Все положения"]),
+                    "issue_date": date.today() - timedelta(days=random.randint(30, 700)),
+                    "expiry_date": date.today() + timedelta(days=random.randint(-30, 400)),  # Некоторые истекают
+                    "status": "Valid"
+                }
+                
+                db_cert = WelderCertificateModel(**cert_data)
+                db.add(db_cert)
+                created_certificates.append(cert_data["certificate_number"])
+        
+        db.commit()
+        
+        return {
+            "message": "Sample welders and certificates created successfully",
+            "created_welders_count": len(created_welders),
+            "created_welders": created_welders,
+            "created_certificates_count": len(created_certificates),
+            "created_certificates": created_certificates
+        }
+    except Exception as e:
+        db.rollback()
+        return {"error": f"Failed to create welders: {str(e)}"}
 # =====================================
 # ЗАВЕРШЕНИЕ И ОБРАБОТКА ОШИБОК
 # =====================================

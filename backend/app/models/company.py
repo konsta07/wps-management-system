@@ -28,3 +28,4 @@ class Company(Base):
     # Связи с другими таблицами
     wps_records = relationship("WPS", back_populates="company", cascade="all, delete-orphan")
     wpqr_records = relationship("WPQR", back_populates="company", cascade="all, delete-orphan")
+    welders = relationship("Welder", back_populates="company", cascade="all, delete-orphan")  # ДОБАВЛЕНО
