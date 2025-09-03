@@ -38,7 +38,19 @@ def _register_fonts():
     global BODY_FONT, BOLD_FONT
     
     try:
-        # Попытка зарегистрировать DejaVu
+        # Проверяем наличие Arial шрифтов (приоритет)
+        arial_path = FONT_DIR / "arial.ttf"
+        arial_bold_path = FONT_DIR / "arialbd.ttf"
+        
+        if arial_path.exists() and arial_bold_path.exists():
+            pdfmetrics.registerFont(TTFont("Arial-Unicode", str(arial_path)))
+            pdfmetrics.registerFont(TTFont("Arial-Unicode-Bold", str(arial_bold_path)))
+            BODY_FONT = "Arial-Unicode"
+            BOLD_FONT = "Arial-Unicode-Bold"
+            print("[PDF] ✅ Arial Unicode fonts registered successfully - Cyrillic support enabled")
+            return
+            
+        # Попытка зарегистрировать DejaVu (fallback)
         dejavusans_path = FONT_DIR / "DejaVuSans.ttf"
         dejavusans_bold_path = FONT_DIR / "DejaVuSans-Bold.ttf"
         
@@ -47,23 +59,16 @@ def _register_fonts():
             pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(dejavusans_bold_path)))
             BODY_FONT = "DejaVuSans"
             BOLD_FONT = "DejaVuSans-Bold"
-            print("[PDF] DejaVu fonts registered successfully")
-        else:
-            # Попытка зарегистрировать Arial
-            arial_path = FONT_DIR / "arial.ttf"
-            arial_bold_path = FONT_DIR / "arialbd.ttf"
+            print("[PDF] ✅ DejaVu fonts registered successfully - Cyrillic support enabled")
+            return
             
-            if arial_path.exists() and arial_bold_path.exists():
-                pdfmetrics.registerFont(TTFont("Arial", str(arial_path)))
-                pdfmetrics.registerFont(TTFont("Arial-Bold", str(arial_bold_path)))
-                BODY_FONT = "Arial"
-                BOLD_FONT = "Arial-Bold"
-                print("[PDF] Arial fonts registered successfully")
-            else:
-                print("[PDF] Using default Helvetica fonts (no cyrillic support)")
+        # Если никаких Unicode шрифтов нет
+        print("[PDF] ⚠️ No Unicode fonts found - using Helvetica (limited Cyrillic support)")
+        BODY_FONT = "Helvetica"
+        BOLD_FONT = "Helvetica-Bold"
                 
     except Exception as e:
-        print(f"[PDF] Font registration failed, using Helvetica: {e}")
+        print(f"[PDF] ❌ Font registration failed, using Helvetica: {e}")
         BODY_FONT = "Helvetica"
         BOLD_FONT = "Helvetica-Bold"
 
@@ -739,8 +744,8 @@ def build_wpqr_pdf_simple(wpqr: WPQRModel, wps: WPSModel | None, company: Compan
     if wps:
         _draw_kv(c, 20, y, "WPS №", f"{wps.wps_number} (rev {wps.revision or '0'})"); y -= 6
         _draw_kv(c, 20, y, "Процесс", wps.welding_process or "-"); y -= 6
-        _draw_kv(c, 20, y, "Материал (спец.)", getattr(wps, 'base_metal_specification', '-')); y -= 6
-        _draw_kv(c, 20, y, "Диапазон толщин", f"{getattr(wps, 'thickness_range_min', '-')}–{getattr(wps, 'thickness_range_max', '-')} мм"); y -= 10
+        _draw_kv(c, 20, y, "Материал (спец.)", getattr(wps, 'base_material_spec', '-')); y -= 6
+        _draw_kv(c, 20, y, "Диапазон толщин", f"{getattr(wps, 'base_material_thickness_min', '-')}–{getattr(wps, 'base_material_thickness_max', '-')} мм"); y -= 10
 
     _draw_kv(c, 20, y, "Сварщик", getattr(wpqr, "welder_name", "-")); y -= 6
     _draw_kv(c, 20, y, "Квалификация", getattr(wpqr, "welder_qualification", "-")); y -= 10
@@ -786,64 +791,64 @@ async def generate_wps_pdf(wps_id: int, db: Session = Depends(get_db)):
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
         
-        # ✅ ПРАВИЛЬНОЕ МАППИНГ ПОЛЕЙ WPS
+        # ✅ ПРАВИЛЬНОЕ МАППИНГ ПОЛЕЙ WPS (соответствует модели)
         wps_data = {
             'wps_number': getattr(wps, 'wps_number', 'N/A'),
             'title': getattr(wps, 'title', 'N/A'),
             'revision': getattr(wps, 'revision', '0'),
-            'date_prepared': datetime.now().strftime('%d.%m.%Y'),  # Используем текущую дату
-            'date_approved': datetime.now().strftime('%d.%m.%Y'),   # Используем текущую дату
-            'welding_code': getattr(wps, 'welding_code', 'N/A'),
+            'date_prepared': datetime.now().strftime('%d.%m.%Y'),
+            'date_approved': getattr(wps, 'approved_date', datetime.now()).strftime('%d.%m.%Y') if getattr(wps, 'approved_date', None) else datetime.now().strftime('%d.%m.%Y'),
+            'welding_code': 'ISO 15614',  # Default standard
             'welding_process': getattr(wps, 'welding_process', 'N/A'),
-            'welding_process_type': getattr(wps, 'welding_process_type', 'N/A'),
+            'welding_process_type': getattr(wps, 'welding_process', 'N/A'),  # Same as process
             'welding_positions': getattr(wps, 'welding_positions', '').split(',') if getattr(wps, 'welding_positions', '') else [],
-            'joint_design': getattr(wps, 'joint_design', getattr(wps, 'joint_type', 'N/A')),
-            'backing_type': getattr(wps, 'backing_type', 'None'),
+            'joint_design': getattr(wps, 'joint_type', 'N/A'),
+            'backing_type': 'None',  # Default
             
-            # Базовые материалы - проверяем правильные имена полей
-            'base_metal_specification': getattr(wps, 'base_metal_specification', getattr(wps, 'base_material_spec', 'N/A')),
-            'base_metal_type_grade': getattr(wps, 'base_metal_type_grade', getattr(wps, 'base_material_grade', 'N/A')),
-            'base_metal_p_number': getattr(wps, 'base_metal_p_number', 'N/A'),
-            'base_metal_group_number': getattr(wps, 'base_metal_group_number', 'N/A'),
-            'thickness_range_min': getattr(wps, 'thickness_range_min', getattr(wps, 'base_material_thickness_min', 0)),
-            'thickness_range_max': getattr(wps, 'thickness_range_max', getattr(wps, 'base_material_thickness_max', 0)),
+            # Базовые материалы (используем реальные поля модели)
+            'base_metal_specification': getattr(wps, 'base_material_spec', 'N/A'),
+            'base_metal_type_grade': getattr(wps, 'base_material_grade', 'N/A'),
+            'base_metal_p_number': 'N/A',  # Поле отсутствует в модели
+            'base_metal_group_number': 'N/A',  # Поле отсутствует в модели
+            'thickness_range_min': getattr(wps, 'base_material_thickness_min', 0),
+            'thickness_range_max': getattr(wps, 'base_material_thickness_max', 0),
             
-            # Присадочные материалы
-            'filler_metal_specification': getattr(wps, 'filler_metal_specification', getattr(wps, 'filler_material_spec', 'N/A')),
-            'filler_metal_classification': getattr(wps, 'filler_metal_classification', getattr(wps, 'filler_material_classification', 'N/A')),
-            'filler_metal_f_number': getattr(wps, 'filler_metal_f_number', 'N/A'),
-            'filler_metal_a_number': getattr(wps, 'filler_metal_a_number', 'N/A'),
-            'filler_metal_diameter': getattr(wps, 'filler_metal_diameter', getattr(wps, 'filler_material_diameter', 'N/A')),
-            'filler_metal_trade_name': getattr(wps, 'filler_metal_trade_name', 'N/A'),
+            # Присадочные материалы (используем реальные поля модели)
+            'filler_metal_specification': getattr(wps, 'filler_material_spec', 'N/A'),
+            'filler_metal_classification': getattr(wps, 'filler_material_classification', 'N/A'),
+            'filler_metal_f_number': 'N/A',  # Поле отсутствует в модели
+            'filler_metal_a_number': 'N/A',  # Поле отсутствует в модели
+            'filler_metal_diameter': getattr(wps, 'filler_material_diameter', 'N/A'),
+            'filler_metal_trade_name': 'N/A',  # Поле отсутствует в модели
             
-            # Параметры сварки
+            # Параметры сварки (используем реальные поля модели)
             'current_type': getattr(wps, 'current_type', 'N/A'),
-            'amperage_range_min': getattr(wps, 'amperage_range_min', getattr(wps, 'current_range_min', 0)),
-            'amperage_range_max': getattr(wps, 'amperage_range_max', getattr(wps, 'current_range_max', 0)),
+            'amperage_range_min': getattr(wps, 'current_range_min', 0),
+            'amperage_range_max': getattr(wps, 'current_range_max', 0),
             'voltage_range_min': getattr(wps, 'voltage_range_min', 0),
             'voltage_range_max': getattr(wps, 'voltage_range_max', 0),
             'travel_speed_min': getattr(wps, 'travel_speed_min', 0),
             'travel_speed_max': getattr(wps, 'travel_speed_max', 0),
             
-            # Защитный газ
-            'shielding_gas_type': getattr(wps, 'shielding_gas_type', 'N/A'),
+            # Защитный газ (используем реальные поля модели)
+            'shielding_gas_type': 'Mixed Gas',  # Default
             'shielding_gas_composition': getattr(wps, 'shielding_gas_composition', ''),
-            'shielding_gas_flow_rate': getattr(wps, 'shielding_gas_flow_rate', getattr(wps, 'gas_flow_rate', 'N/A')),
+            'shielding_gas_flow_rate': getattr(wps, 'gas_flow_rate', 'N/A'),
             
-            # Температурные параметры
+            # Температурные параметры (используем реальные поля модели)
             'preheat_temp_min': getattr(wps, 'preheat_temp_min', 0),
             'preheat_temp_max': getattr(wps, 'preheat_temp_max', 0),
-            'interpass_temp_min': getattr(wps, 'interpass_temp_min', 0),
+            'interpass_temp_min': getattr(wps, 'interpass_temp_max', 0),  # Используем max для min (нет min в модели)
             'interpass_temp_max': getattr(wps, 'interpass_temp_max', 0),
             'pwht_temperature': getattr(wps, 'pwht_temperature', 'N/A'),
             'pwht_time': getattr(wps, 'pwht_time', 'N/A'),
             
-            # Дополнительные поля
-            'technique': getattr(wps, 'technique', 'Standard welding technique'),
-            'cleaning': getattr(wps, 'cleaning', 'Wire brush'),
-            'remarks': getattr(wps, 'remarks', 'No remarks'),
+            # Дополнительные поля (отсутствуют в модели - используем defaults)
+            'technique': 'Standard welding technique as per procedure',
+            'cleaning': 'Wire brush and solvent cleaning',
+            'remarks': getattr(wps, 'qualified_by_wpqr', 'No additional remarks'),
             'status': getattr(wps, 'status', 'Draft'),
-            'prepared_by': getattr(wps, 'prepared_by', 'N/A'),
+            'prepared_by': 'Engineering Department',
             'approved_by': getattr(wps, 'approved_by', 'N/A'),
         }
         

@@ -27,4 +27,5 @@ def get_db():
 def create_tables():
     # Импортируем модели чтобы они были зарегистрированы
     from .models import Company, WPS, WPQR, User
+    from .models.welder import Welder, WelderCertificate
     Base.metadata.create_all(bind=engine)
